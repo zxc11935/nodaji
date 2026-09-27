@@ -94,10 +94,19 @@ commercial-area-analysis-ai/
 ### 백엔드 — `.env` (루트 디렉토리)
 
 ```
+SECRET_KEY=<Django 시크릿 키>
 NAVER_CLIENT_ID=<네이버 API 클라이언트 ID>
 NAVER_CLIENT_SECRET=<네이버 API 클라이언트 시크릿>
 DB_PW=<PostgreSQL 비밀번호 (SQLite 사용 시 불필요)>
+KAKAO_REST_API_KEY=<카카오 REST API 키 (소셜 로그인)>
+KAKAO_CLIENT_SECRET=<카카오 클라이언트 시크릿 (소셜 로그인)>
 ```
+
+> `SECRET_KEY`가 없으면 백엔드 서버가 시작되지 않습니다. 아래 명령으로 생성하세요.
+> `python -c "from django.core.management.utils import get_random_secret_key as g; print(g())"`
+
+> 카카오 소셜 로그인: [카카오 개발자 페이지](https://developers.kakao.com)에서 REST API 키의 Redirect URI에
+> `http://localhost:8000/api/accounts/kakao/callback/`을 등록하고, 클라이언트 시크릿을 `KAKAO_CLIENT_SECRET`에 넣습니다.
 
 ### 프론트엔드 — `frontend-react/.env`
 
@@ -252,9 +261,9 @@ data/raw_data/store_info/
 
 ```
 data/category_maps/
-├── categories.csv          # 25개 통합 카테고리 목록
-├── sales_category_map.csv  # 매출 데이터 업종 → 통합카테고리 매핑
-└── store_category_map.csv  # 상가 데이터 업종 → 통합카테고리 매핑
+├── categories.csv          # (미사용) 초기 대분류 초안 25종 — 코드에서 읽지 않음
+├── sales_category_map.csv  # 매출 업종코드 62종 → 통합카테고리 51종 (서비스 기준 분류)
+└── store_category_map.csv  # 상가 업종중분류 75종 → 통합카테고리 28종 (임포트 시 소분류 보정 추가)
 ```
 
 ---
@@ -282,18 +291,21 @@ jupyter notebook ai/category_map.ipynb
 # 2) 원본 데이터 병합 및 피처 엔지니어링 (data/processed_data/final_dataset.csv 생성)
 jupyter notebook ai/build_merged_dataset.ipynb
 
-# 3) 모델 학습 및 추천 점수 생성 (data/processed_data/scores.csv 생성)
-python ai/retrain_scores.py
+# 3) 네이버 플레이스 크롤링 지표 병합 (final_dataset.csv를 제자리에서 덮어씀)
+cd ai && python enrich_dong_dataset.py
+
+# 4) 모델 학습 및 추천 점수 생성 (data/processed_data/scores.csv 생성)
+python retrain_scores.py && cd ..
 ```
 
 ```bash
-# 4) 위치 점수 및 임대 데이터 빌드
+# 5) 위치 점수 및 임대 데이터 빌드
 python scripts/build_location_scores.py    # → data/processed_data/location_scores.csv
 python scripts/build_rental_data.py        # → data/processed_data/rental_data.json
 python scripts/build_gu_rental.py          # → data/processed_data/gu_rental.json
 ```
 
-> `final_dataset.csv` 생성에는 수십 분이 소요될 수 있습니다 (약 210MB).
+> `final_dataset.csv` 생성에는 수십 분이 소요될 수 있습니다 (약 408MB).
 
 ---
 
@@ -331,7 +343,7 @@ npm run dev
 
 | 파일 | 크기 | 설명 |
 |---|---|---|
-| `final_dataset.csv` | ~210MB | ML 학습용 데이터 (190,089행, 20컬럼) |
+| `final_dataset.csv` | ~408MB | ML 학습용 데이터 (408,576행, 101컬럼 / 2019Q1~2025Q3) |
 | `location_scores.csv` | ~13MB | 행정동×업종 위치 추천 점수 |
 | `naver_place_info.csv` | ~15MB | 네이버 플레이스 크롤링 결과 |
 | `scores.csv` | ~423KB | 모델 예측 점수 (최신 분기 기준) |
@@ -343,10 +355,11 @@ npm run dev
 ## AI 모델
 
 - **문제 유형**: Binary Classification (다음 분기 매출 성장 여부 예측)
-- **모델**: LightGBM (`n_estimators=500`, `class_weight="balanced"`)
-- **학습 기간**: 2020Q1 ~ 2025Q1 (23개 분기, ~170K 샘플)
-- **피처 수**: 41개 (유동인구 변화율, 나이별 매출, 시간대별 비율, 개업률 등)
-- **AUC-ROC**: 0.657
+- **모델**: LightGBM (`n_estimators=500`, `class_weight="balanced"`, `random_state=42`)
+- **학습 데이터**: 2019Q1 ~ 2025Q2, 라벨 생성 후 390,692 샘플
+- **검증 방식**: 시계열 홀드아웃 — 학습 2019Q1~2025Q1 (375,929건) / 테스트 2025Q2 (14,763건)
+- **피처 수**: 47개 (유동인구 증감률, 연령대별 매출 비율, 시간대별 비율, 개업·폐업률, 네이버 플레이스 크롤링 지표 등)
+- **AUC-ROC**: 0.651 (2025Q2 홀드아웃 기준)
 - **AI 보고서**: Gemini 2.5 Flash — HTTP REST 전용 (gRPC SDK hang 이슈 회피)
 
 자세한 내용은 [data/README_DATASET.md](data/README_DATASET.md)를 참고하세요.

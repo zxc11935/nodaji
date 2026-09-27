@@ -136,16 +136,16 @@ commercial-area-analysis-ai/
     │   └── store_info/               # 소상공인 상가정보 (분기별)
     │
     ├── processed_data/
-    │   ├── final_dataset.csv         # ML 학습 데이터 (210MB, 190K행)
+    │   ├── final_dataset.csv         # ML 학습 데이터 (약 408MB, 408,576행 × 101컬럼)
     │   ├── scores.csv                # AI 예측 점수 (ScoreData 임포트용)
     │   ├── location_scores.csv       # 위치 추천 점수
     │   ├── rental_data.json          # 임대료 (행정동별)
     │   └── gu_rental.json            # 임대료 (구별)
     │
     └── category_maps/
-        ├── categories.csv
-        ├── sales_category_map.csv
-        └── store_category_map.csv
+        ├── categories.csv            # (미사용) 초기 대분류 초안 25종 — 코드에서 읽지 않음
+        ├── sales_category_map.csv    # 매출 업종코드 62종 → 통합카테고리 51종 (서비스 기준 분류)
+        └── store_category_map.csv    # 상가 업종중분류 75종 → 통합카테고리 28종 (임포트 시 소분류 보정 추가)
 ```
 
 ---
@@ -651,11 +651,14 @@ post, user
 ## AI/ML 파이프라인
 
 ### 모델 사양 (retrain_scores.py)
-- **모델**: LightGBM (500 estimators, balanced class weight)
 - **문제 유형**: 이진 분류 (다음 분기 매출 성장 여부)
-- **학습 기간**: 2020Q1 ~ 2025Q1 (23개 분기, ~170K 샘플)
-- **피처 수**: 41개 (유동인구 변화율, 나이별 매출, 시간대별 비율, 개업률 등)
-- **AUC-ROC**: 0.657 (현재)
+- **모델**: LightGBM (`n_estimators=500`, `class_weight="balanced"`, `random_state=42`)
+- **학습 데이터**: 2019Q1 ~ 2025Q2 (26개 분기), 라벨 생성 후 390,692 샘플
+- **검증 방식**: 시계열 홀드아웃 — 학습 2019Q1~2025Q1 (375,929건) / 테스트 2025Q2 (14,763건)
+- **피처 수**: 47개 (유동인구 증감률, 연령대별 매출 비율, 시간대별 비율, 개업·폐업률, 네이버 플레이스 크롤링 지표 등)
+- **AUC-ROC**: 0.651 (2025Q2 홀드아웃 기준)
+- 원본 `final_dataset.csv`는 2019Q1~2025Q3(27개 분기)이며, 마지막 분기는 다음 분기 매출이 없어 라벨에서 제외됨
+- `retrain_scores.py`는 `crawl_*` 컬럼이 필요하므로 `enrich_dong_dataset.py`를 먼저 실행해야 함 (이 스크립트는 `final_dataset.csv`를 제자리에서 덮어씀)
 - **출력**: `scores.csv` → DB `import_scores` 커맨드로 임포트
 
 ### 재학습 절차

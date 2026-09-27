@@ -112,6 +112,9 @@ class CommercialData(models.Model):
             models.Index(fields=["행정동명", "기준_년분기_코드"]),
             models.Index(fields=["기준_년분기_코드"]),
             models.Index(fields=["행정동명", "통합카테고리"]),
+            # 업종×분기 조회 최적화 (트렌드/추천 API). 로컬 DB에 수동 생성돼 있던
+            # 인덱스를 마이그레이션으로 이관 — 기존 이름 idx_cd_cat_quarter 유지.
+            models.Index(fields=["통합카테고리", "기준_년분기_코드"], name="idx_cd_cat_quarter"),
         ]
 
 

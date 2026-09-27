@@ -83,7 +83,8 @@ Buffers read는 흔들리지 않으므로 이쪽이 더 신뢰할 지표.
 ---
 
 ### 남은 작업
-- [ ] 수동 DDL을 Django 마이그레이션으로 이전 (현재 코드에 없음 → 배포 시 소실)
+- [x] 수동 DDL을 Django 마이그레이션으로 이전 (현재 코드에 없음 → 배포 시 소실)
+  → 2026-09-27 완료: `backend/analysis/migrations/0010_commercialdata_idx_cd_cat_quarter.py`
 - [ ] recommend_industry API 레벨 응답 시간 측정 (카테고리 51개 × 전체 스캔 루프)
 - [ ] ScoreData에 행정동코드 추가
 
@@ -93,3 +94,13 @@ Buffers read는 흔들리지 않으므로 이쪽이 더 신뢰할 지표.
 - 한글 컬럼명 — 전면 수정 시 코드 전체 파손
 - gu_report의 빈 for 루프, _REPORT_CACHE 무한 증가,
   _NAVER_TREND_KEYWORDS의 "카페" 중복 키
+
+---
+
+## 2026-09-27
+
+- 수동 생성 인덱스 `idx_cd_cat_quarter`를 Django 마이그레이션으로 이관
+  (`SeparateDatabaseAndState` + `CREATE INDEX IF NOT EXISTS` → 기존 DB 호환 유지, 인덱스 중복 없음)
+- `SECRET_KEY` 하드코딩 fallback 제거 및 `.env` 환경변수화, 키 교체
+- 문서(README·CLAUDE.md)의 모델·데이터셋 수치를 실측값으로 정정
+  (재현 결과: 47개 피처, 390,692 샘플, 2025Q2 홀드아웃 AUC 0.651)
