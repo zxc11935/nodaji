@@ -7,7 +7,7 @@
 - 핵심 테이블: analysis 5개 (CommercialData, StreetCommercialData,
   ScoreData, StreetScoreData, StoreInfo)
 - CommercialData: 408,576행 / 컬럼 약 100개 / 카테고리 51종 / 분기 27개
-- StoreInfo: 534,987행
+- StoreInfo: 534,978행 (9/27 재측정으로 정정)
 
 ---
 
@@ -21,7 +21,7 @@
 **검증**
 - StoreInfo ↔ CommercialData 행정동명 매칭 실패 5개 동
   → 신설동 1,242 / 용두동 1,017 / 상일1동 671 / 개포3동 329 / 상일2동 144
-  → 합계 3,403건 = 전체 534,987건의 0.64%
+  → 합계 3,403건 = 전체 534,978건의 0.64% (9/27 재측정으로 정정)
 - 행정동명별 DISTINCT 행정동코드 집계 → '신사동'이 코드 2개 (강남구/관악구)
 
 **판단**

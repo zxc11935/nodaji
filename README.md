@@ -362,8 +362,6 @@ npm run dev
 - **AUC-ROC**: 0.651 (2025Q2 홀드아웃 기준)
 - **AI 보고서**: Gemini 2.5 Flash — HTTP REST 전용 (gRPC SDK hang 이슈 회피)
 
-자세한 내용은 [data/README_DATASET.md](data/README_DATASET.md)를 참고하세요.
-
 ---
 
 ## 데이터 출처

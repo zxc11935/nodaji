@@ -113,12 +113,17 @@ if DATABASE_URL:
         )
     }
 else:
+    DB_PW = os.environ.get("DB_PW")
+    if not DB_PW:
+        raise ImproperlyConfigured(
+            "DB_PW 환경변수가 없습니다. 프로젝트 루트 .env에 DB_PW를 설정하세요."
+        )
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.postgresql',
             'NAME': 'commercial_db',
             'USER': 'commercial_user',
-            'PASSWORD': os.environ.get('DB_PW', '5891'),
+            'PASSWORD': DB_PW,
             'HOST': '127.0.0.1',
             'PORT': '5432',
             'OPTIONS': {
