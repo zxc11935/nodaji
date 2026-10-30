@@ -338,6 +338,11 @@ const CATEGORY_GROUPS = {
 
 // GeoJSON은 중점(·) 사용, 데이터셋은 마침표(.) 사용 → API 호출 시 정규화
 const normalizeDongName = (name) => name.replace(/·/g, ".");
+// 이름이 같은 동(신사동: 강남구·관악구)을 구분하려고 API에는 "구 동" 형태로 보낸다 (2026-10-28)
+const dongKey = (dongName, guName) => {
+  const name = normalizeDongName(dongName || "");
+  return guName ? `${guName} ${name}` : name;
+};
 
 const POLYGON_DEFAULT    = { fillColor: "#9EC8F0", fillOpacity: 0.01, strokeColor: "#9CA3AF", strokeOpacity: 0.8, strokeWeight: 2 };
 const POLYGON_HOVER      = { fillColor: "#60A5FA", fillOpacity: 0.35, strokeColor: "#3B82F6", strokeOpacity: 1,  strokeWeight: 1 };
@@ -545,6 +550,7 @@ export default function MapPage() {
   const [savedGuReportCategory, setSavedGuReportCategory] = useState("");
   const [savedGuReportRegion, setSavedGuReportRegion] = useState(null);
   const [aiDong, setAiDong] = useState("");
+  const [aiDongGu, setAiDongGu] = useState(""); // 자동완성·지도에서 고른 동의 구 (직접 입력하면 비움)
   const [aiDongSuggestions, setAiDongSuggestions] = useState([]);
   const [aiDongSuggestOpen, setAiDongSuggestOpen] = useState(false);
   const [aiDongSuggestIdx, setAiDongSuggestIdx] = useState(-1);
@@ -1471,7 +1477,7 @@ export default function MapPage() {
 
     Promise.all(storeCategoryFilter.map((cat) => {
       const params = new URLSearchParams({
-        dong: normalizeDongName(selectedDong.dongName),
+        dong: dongKey(selectedDong.dongName, selectedDong.guName),
         category: cat,
       });
       return fetch(`${API}/api/stores/?${params}`)
@@ -1506,7 +1512,7 @@ export default function MapPage() {
   // 행정동 선택 시 전체 업종 점수 fetch
   useEffect(() => {
     if (!selectedDong) return;
-    fetch(`${API}/api/score-all/?dong=${encodeURIComponent(normalizeDongName(selectedDong.dongName))}`)
+    fetch(`${API}/api/score-all/?dong=${encodeURIComponent(dongKey(selectedDong.dongName, selectedDong.guName))}`)
       .then((r) => r.json())
       .then((data) => setScoreData(data.scores || []))
       .catch(() => setScoreData([]));
@@ -1521,7 +1527,7 @@ export default function MapPage() {
     }
     setAvailableQuarters([]);
     setSelectedQuarter(null);
-    fetch(`${API}/api/quarters/?dong=${encodeURIComponent(normalizeDongName(selectedDong.dongName))}`)
+    fetch(`${API}/api/quarters/?dong=${encodeURIComponent(dongKey(selectedDong.dongName, selectedDong.guName))}`)
       .then((r) => r.json())
       .then((data) => setAvailableQuarters(data.quarters || []))
       .catch(() => setAvailableQuarters([]));
@@ -1537,8 +1543,8 @@ export default function MapPage() {
     setReportCategory("");
     setDongLoading(true);
     const url = selectedQuarter
-      ? `${API}/api/analysis/?dong=${encodeURIComponent(normalizeDongName(selectedDong.dongName))}&quarter=${selectedQuarter}`
-      : `${API}/api/analysis/?dong=${encodeURIComponent(normalizeDongName(selectedDong.dongName))}`;
+      ? `${API}/api/analysis/?dong=${encodeURIComponent(dongKey(selectedDong.dongName, selectedDong.guName))}&quarter=${selectedQuarter}`
+      : `${API}/api/analysis/?dong=${encodeURIComponent(dongKey(selectedDong.dongName, selectedDong.guName))}`;
     fetch(url)
       .then((r) => r.json())
       .then((data) => setDongData(data))
@@ -1558,7 +1564,7 @@ export default function MapPage() {
     setGuSelectedQuarter(null);
     const dongs = guToDongsRef.current[selectedGu] || [];
     if (!dongs.length) return;
-    fetch(`${API}/api/gu-quarters/?dongs=${encodeURIComponent(dongs.join(","))}`)
+    fetch(`${API}/api/gu-quarters/?dongs=${encodeURIComponent(dongs.join(","))}&gu=${encodeURIComponent(selectedGu)}`)
       .then((r) => r.json())
       .then((data) => setGuAvailableQuarters(data.quarters || []))
       .catch(() => setGuAvailableQuarters([]));
@@ -1942,8 +1948,8 @@ export default function MapPage() {
 
   // ── 지역 비교 요청 ──
   function handleCompareRegion() {
-    const nameA = cmpRegionType === "dong" ? cmpRegionASelected?.dong : cmpRegionASelected;
-    const nameB = cmpRegionType === "dong" ? cmpRegionBSelected?.dong : cmpRegionBSelected;
+    const nameA = cmpRegionType === "dong" ? (cmpRegionASelected && dongKey(cmpRegionASelected.dong, cmpRegionASelected.gu)) : cmpRegionASelected;
+    const nameB = cmpRegionType === "dong" ? (cmpRegionBSelected && dongKey(cmpRegionBSelected.dong, cmpRegionBSelected.gu)) : cmpRegionBSelected;
     if (!nameA || !nameB || !cmpRegionCat) return;
     setCompareRegionStep("loading");
     fetch(`${API}/api/compare/region/?type=${cmpRegionType}&a=${encodeURIComponent(nameA)}&b=${encodeURIComponent(nameB)}&category=${encodeURIComponent(cmpRegionCat)}`)
@@ -1954,7 +1960,7 @@ export default function MapPage() {
 
   // ── 업종 비교 요청 ──
   function handleCompareIndustry() {
-    const regionName = cmpIndRegionType === "dong" ? cmpIndRegionSelected?.dong : cmpIndRegionSelected;
+    const regionName = cmpIndRegionType === "dong" ? (cmpIndRegionSelected && dongKey(cmpIndRegionSelected.dong, cmpIndRegionSelected.gu)) : cmpIndRegionSelected;
     if (!regionName || !cmpIndCatA || !cmpIndCatB) return;
     setCompareIndustryStep("loading");
     fetch(`${API}/api/compare/industry/?region=${encodeURIComponent(regionName)}&region_type=${cmpIndRegionType}&cat_a=${encodeURIComponent(cmpIndCatA)}&cat_b=${encodeURIComponent(cmpIndCatB)}`)
@@ -1999,7 +2005,7 @@ export default function MapPage() {
         .catch(() => { showToast("서버 연결에 실패했습니다."); setAiStep("survey"); });
     } else if (mode === "industry") {
       Promise.all([
-        fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(aiDong.trim())}`).then((r) => r.json()),
+        fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(dongKey(aiDong.trim(), aiDongGu))}`).then((r) => r.json()),
         delay(MIN_LOADING_MS),
       ])
         .then(([data]) => {
@@ -2010,7 +2016,7 @@ export default function MapPage() {
         .catch(() => { showToast("서버 연결에 실패했습니다."); setAiStep("survey"); });
     } else if (mode === "score") {
       Promise.all([
-        fetch(`${API}/api/recommend/score/?dong=${encodeURIComponent(aiDong.trim())}&category=${encodeURIComponent(aiIndustry)}`).then((r) => r.json()),
+        fetch(`${API}/api/recommend/score/?dong=${encodeURIComponent(dongKey(aiDong.trim(), aiDongGu))}&category=${encodeURIComponent(aiIndustry)}`).then((r) => r.json()),
         delay(MIN_LOADING_MS),
       ])
         .then(([data]) => {
@@ -2098,7 +2104,7 @@ export default function MapPage() {
 
     if (mode === "industry") {
       Promise.all([
-        fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(aiDong.trim())}`).then((r) => r.json()),
+        fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(dongKey(aiDong.trim(), aiDongGu))}`).then((r) => r.json()),
         delay(MIN_LOADING_MS),
       ])
         .then(([data]) => {
@@ -2113,7 +2119,7 @@ export default function MapPage() {
     if (mode === "score") {
       setAiScoreSuggestions({ regions: [], industries: [] });
       Promise.all([
-        fetch(`${API}/api/recommend/score/?dong=${encodeURIComponent(aiDong.trim())}&category=${encodeURIComponent(aiIndustry)}`).then((r) => r.json()),
+        fetch(`${API}/api/recommend/score/?dong=${encodeURIComponent(dongKey(aiDong.trim(), aiDongGu))}&category=${encodeURIComponent(aiIndustry)}`).then((r) => r.json()),
         delay(MIN_LOADING_MS),
       ])
         .then(([data]) => {
@@ -2121,8 +2127,8 @@ export default function MapPage() {
           setAiResults(data);
           setAiStep("result");
           const dong = aiDong.trim();
-          const gu = polygonGroupsRef.current.find((g) => g.dongName === dong)?.guName ?? "";
-          const indFetch = fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(dong)}`).then((r) => r.json()).catch(() => null);
+          const gu = aiDongGu || polygonGroupsRef.current.find((g) => g.dongName === dong)?.guName || "";
+          const indFetch = fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(dongKey(dong, gu))}`).then((r) => r.json()).catch(() => null);
           const regFetch = gu
             ? fetch(`${API}/api/recommend/location/?업종=${encodeURIComponent(aiIndustry)}&gu=${encodeURIComponent(gu)}`).then((r) => r.json()).catch(() => null)
             : Promise.resolve(null);
@@ -2396,6 +2402,7 @@ export default function MapPage() {
     setAiIndustry(industry);
     setAiRegion(region);
     setAiDong(dong);
+    setAiDongGu("");
     setAiGu("");
     setAiResults(null);
     setAiDongGuTab("dong");
@@ -2414,6 +2421,7 @@ export default function MapPage() {
     setAiModalOpen(true);
     setAiMode("industry");
     setAiDong(dongName);
+    setAiDongGu(guName || "");
     setAiRegion(guName);
     setAiIndustry(null);
     setAiResults(null);
@@ -2421,7 +2429,7 @@ export default function MapPage() {
     setMenuOpen(false);
     setAiStep("loading");
     Promise.all([
-      fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(dongName.trim())}`).then((r) => r.json()),
+      fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(dongKey(dongName.trim(), guName))}`).then((r) => r.json()),
       new Promise((res) => setTimeout(res, 1200)),
     ])
       .then(([data]) => {
@@ -2664,7 +2672,7 @@ export default function MapPage() {
                 const baseKeys = ["상권_개요", "인기_업종", "유동인구_분석"];
                 const catKeys = [...baseKeys, "소비_패턴", "비용_수익", "기타_통계"];
                 if (selectedDong) {
-                  const dong = normalizeDongName(selectedDong.dongName);
+                  const dong = dongKey(selectedDong.dongName, selectedDong.guName);
                   const categoryParam = reportCategory ? `&category=${encodeURIComponent(reportCategory)}` : "";
                   const reqKeys = reportCategory ? catKeys : baseKeys;
                   // Phase 1: DB 데이터만 즉시 로드
@@ -3665,7 +3673,7 @@ export default function MapPage() {
                           const aiCatKeys = ["소비_패턴", "비용_수익", "기타_통계"];
                           const errMsg2 = (ai) => ai.rate_limited ? "AI 사용량이 초과됐습니다. 잠시 후 다시 시도해주세요." : "AI 설명 생성에 실패했습니다.";
                           if (selectedDong) {
-                            const dong = normalizeDongName(selectedDong.dongName);
+                            const dong = dongKey(selectedDong.dongName, selectedDong.guName);
                             // Phase 1: DB 데이터만 즉시
                             fetch(`${API}/api/report/?dong=${encodeURIComponent(dong)}&category=${encodeURIComponent(cat)}&data_only=1`)
                               .then((r) => r.json()).then((d1) => {
@@ -3906,7 +3914,7 @@ export default function MapPage() {
                                     </div>
                                     <button
                                       onClick={() => {
-                                        const dong = item.dongName;
+                                        const dong = dongKey(item.dongName, item.guName);
                                         setSavedGuReportData(reportData);
                                         setSavedGuReportCategory(reportCategory);
                                         setSavedGuReportRegion(reportRegion);
@@ -4015,7 +4023,7 @@ export default function MapPage() {
                           <div style={{ display: "flex", gap: 8 }}>
                             {similarDongs.map((item) => (
                               <div
-                                key={item.dong}
+                                key={`${item.gu}-${item.dong}`}
                                 onClick={() => {
                                   setSavedGuReportData(reportData);
                                   setSavedGuReportCategory(reportCategory);
@@ -4023,10 +4031,10 @@ export default function MapPage() {
                                   setReportLoading(true);
                                   setAiTyped({});
                                   const catParamSim = (reportCategory || reportData.category) ? `&category=${encodeURIComponent(reportCategory || reportData.category)}` : "";
-                                  fetch(`${API}/api/report/?dong=${encodeURIComponent(item.dong)}${catParamSim}&data_only=1`)
+                                  fetch(`${API}/api/report/?dong=${encodeURIComponent(dongKey(item.dong, item.gu))}${catParamSim}&data_only=1`)
                                     .then((r) => r.json())
                                     .then((d1) => {
-                                      setReportData({ ...d1, _dong: item.dong });
+                                      setReportData({ ...d1, _dong: dongKey(item.dong, item.gu) });
                                       setReportRegion({ name: item.dong, subName: reportRegion?.subName || "" });
                                       setReportLoading(false);
                                       setReportAiLoading(true);
@@ -4186,8 +4194,8 @@ export default function MapPage() {
                     )}
                   </div>
                   {(() => {
-                    const nameA = cmpRegionType === "dong" ? cmpRegionASelected?.dong : cmpRegionASelected;
-                    const nameB = cmpRegionType === "dong" ? cmpRegionBSelected?.dong : cmpRegionBSelected;
+                    const nameA = cmpRegionType === "dong" ? (cmpRegionASelected && dongKey(cmpRegionASelected.dong, cmpRegionASelected.gu)) : cmpRegionASelected;
+                    const nameB = cmpRegionType === "dong" ? (cmpRegionBSelected && dongKey(cmpRegionBSelected.dong, cmpRegionBSelected.gu)) : cmpRegionBSelected;
                     const disabled = !nameA || !nameB || !cmpRegionCat;
                     return (
                       <button onClick={handleCompareRegion} disabled={disabled} style={{ width: "100%", padding: "13px 0", background: disabled ? "#E5E7EB" : "linear-gradient(135deg,#2563EB,#3B82F6)", color: disabled ? "#9CA3AF" : "#fff", border: "none", borderRadius: 12, fontSize: 17, fontWeight: 700, cursor: disabled ? "not-allowed" : "pointer", marginTop: 4 }}>
@@ -4401,7 +4409,7 @@ export default function MapPage() {
                     </div>
                   ))}
                   {(() => {
-                    const rName = cmpIndRegionType==="dong"?cmpIndRegionSelected?.dong:cmpIndRegionSelected;
+                    const rName = cmpIndRegionType==="dong"?(cmpIndRegionSelected && dongKey(cmpIndRegionSelected.dong, cmpIndRegionSelected.gu)):cmpIndRegionSelected;
                     const disabled = !rName || !cmpIndCatA || !cmpIndCatB;
                     return (
                       <button onClick={handleCompareIndustry} disabled={disabled} style={{ width:"100%", padding:"13px 0", background:disabled?"#E5E7EB":"linear-gradient(135deg,#0EA5E9,#38BDF8)", color:disabled?"#9CA3AF":"#fff", border:"none", borderRadius:12, fontSize:17, fontWeight:700, cursor:disabled?"not-allowed":"pointer", marginTop:4 }}>
@@ -4566,7 +4574,7 @@ export default function MapPage() {
                   </div>
                   <button
                     disabled={!aiMode}
-                    onClick={() => { setAiStep("form"); setAiIndustry(null); setAiDong(""); setAiGu(""); setAiIndustrySearchQuery(""); setAiIndustryDrillGroup(null); setDongLocReady(false); setDongLocChoice(null); setAiDongSubMode(null); }}
+                    onClick={() => { setAiStep("form"); setAiIndustry(null); setAiDong(""); setAiDongGu(""); setAiGu(""); setAiIndustrySearchQuery(""); setAiIndustryDrillGroup(null); setDongLocReady(false); setDongLocChoice(null); setAiDongSubMode(null); }}
                     style={{ width: "100%", padding: "13px 0", background: aiMode ? "linear-gradient(135deg, #2563EB, #3B82F6)" : "#E5E7EB", color: aiMode ? "#fff" : "#9CA3AF", border: "none", borderRadius: 12, fontSize: 16, fontWeight: 700, cursor: aiMode ? "pointer" : "not-allowed", transition: "all 0.2s" }}
                   >
                     다음 →
@@ -4780,6 +4788,7 @@ export default function MapPage() {
                         onChange={(e) => {
                           const v = e.target.value;
                           setAiDong(v);
+                          setAiDongGu("");
                           setAiDongSuggestIdx(-1);
                           if (v.trim().length >= 1) {
                             const all = polygonGroupsRef.current || [];
@@ -4806,7 +4815,7 @@ export default function MapPage() {
                             const idx = aiDongSuggestIdx >= 0 ? aiDongSuggestIdx : 0;
                             if (aiDongSuggestions[idx]) {
                               e.preventDefault();
-                              setAiDong(aiDongSuggestions[idx].dongName);
+                              setAiDong(aiDongSuggestions[idx].dongName); setAiDongGu(aiDongSuggestions[idx].guName || "");
                               setAiDongSuggestOpen(false);
                               setAiDongSuggestIdx(-1);
                             }
@@ -4826,8 +4835,8 @@ export default function MapPage() {
                         <div style={{ position: "absolute", left: 0, right: 0, background: "#fff", border: "1.5px solid #E5E7EB", borderTop: "none", borderRadius: "0 0 10px 10px", zIndex: 10, maxHeight: 220, overflowY: "auto" }}>
                           {aiDongSuggestions.map((s, i) => (
                             <div
-                              key={s.dongName}
-                              onMouseDown={() => { setAiDong(s.dongName); setAiDongSuggestOpen(false); setAiDongSuggestIdx(-1); }}
+                              key={`${s.guName}-${s.dongName}`}
+                              onMouseDown={() => { setAiDong(s.dongName); setAiDongGu(s.guName || ""); setAiDongSuggestOpen(false); setAiDongSuggestIdx(-1); }}
                               style={{ padding: "9px 14px", cursor: "pointer", fontSize: 14, display: "flex", justifyContent: "space-between", alignItems: "center", background: i === aiDongSuggestIdx ? "#EFF6FF" : "transparent", borderBottom: i < aiDongSuggestions.length - 1 ? "1px solid #F3F4F6" : "none" }}
                               onMouseEnter={() => setAiDongSuggestIdx(i)}
                             >
@@ -4926,7 +4935,7 @@ export default function MapPage() {
                             setAiScoreSuggestions({ regions: [], industries: [] });
                             setAiStep("loading");
                             Promise.all([
-                              fetch(`${API}/api/recommend/score/?dong=${encodeURIComponent(aiDong.trim())}&category=${encodeURIComponent(cat)}`).then((r) => r.json()),
+                              fetch(`${API}/api/recommend/score/?dong=${encodeURIComponent(dongKey(aiDong.trim(), aiDongGu))}&category=${encodeURIComponent(cat)}`).then((r) => r.json()),
                               new Promise((res) => setTimeout(res, 1200)),
                             ])
                               .then(([data]) => {
@@ -4935,7 +4944,7 @@ export default function MapPage() {
                                 setAiStep("result");
                                 // 하단 추천 스트립용 데이터 비동기 fetch
                                 Promise.all([
-                                  fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(aiDong.trim())}`).then(r => r.json()).catch(() => null),
+                                  fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(dongKey(aiDong.trim(), aiDongGu))}`).then(r => r.json()).catch(() => null),
                                 ]).then(([indData]) => {
                                   setAiScoreSuggestions({ industries: indData?.results?.slice(0, 6) ?? [] });
                                 });
@@ -5232,7 +5241,7 @@ export default function MapPage() {
                           </div>
                           {aiMode === "dong" && (
                             <button
-                              onClick={() => handleSpotRecommend(item.dongName, aiResults[0]?.통합카테고리 || item.통합카테고리 || item.category)}
+                              onClick={() => handleSpotRecommend(dongKey(item.dongName, item.guName), aiResults[0]?.통합카테고리 || item.통합카테고리 || item.category)}
                               style={{ marginTop: 10, width: "100%", padding: "9px 0", borderRadius: 10, border: "none", background: "linear-gradient(90deg,#3B82F6,#6366F1)", color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" }}
                             >
                               📍 이 동네 안 위치 추천 보기
@@ -5550,19 +5559,20 @@ export default function MapPage() {
                                   <button key={reg.dongName}
                                     onClick={() => {
                                       setAiDong(reg.dongName);
+                                      setAiDongGu(reg.guName || "");
                                       setAiScoreTab("종합");
                                       setAiScoreSuggestions({ regions: [], industries: [] });
                                       setAiStep("loading");
                                       const dong = reg.dongName;
                                       Promise.all([
-                                        fetch(`${API}/api/recommend/score/?dong=${encodeURIComponent(dong)}&category=${encodeURIComponent(aiIndustry)}`).then(r => r.json()),
+                                        fetch(`${API}/api/recommend/score/?dong=${encodeURIComponent(dongKey(dong, reg.guName))}&category=${encodeURIComponent(aiIndustry)}`).then(r => r.json()),
                                         new Promise(res => setTimeout(res, 1200)),
                                       ]).then(([data]) => {
                                         if (data.error) { showToast(data.error); setAiStep("form"); return; }
                                         setAiResults(data);
                                         setAiStep("result");
-                                        const gu = polygonGroupsRef.current.find((g) => g.dongName === dong)?.guName ?? "";
-                                        const indF = fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(dong)}`).then(r => r.json()).catch(() => null);
+                                        const gu = reg.guName || polygonGroupsRef.current.find((g) => g.dongName === dong)?.guName || "";
+                                        const indF = fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(dongKey(dong, gu))}`).then(r => r.json()).catch(() => null);
                                         const regF = gu ? fetch(`${API}/api/recommend/location/?업종=${encodeURIComponent(aiIndustry)}&gu=${encodeURIComponent(gu)}`).then(r => r.json()).catch(() => null) : Promise.resolve(null);
                                         Promise.all([indF, regF]).then(([indData, regData]) => {
                                           setAiScoreSuggestions({
@@ -5612,15 +5622,15 @@ export default function MapPage() {
                                       setAiScoreSuggestions({ regions: [], industries: [] });
                                       setAiStep("loading");
                                       Promise.all([
-                                        fetch(`${API}/api/recommend/score/?dong=${encodeURIComponent(aiDong.trim())}&category=${encodeURIComponent(ind.category)}`).then(r => r.json()),
+                                        fetch(`${API}/api/recommend/score/?dong=${encodeURIComponent(dongKey(aiDong.trim(), aiDongGu))}&category=${encodeURIComponent(ind.category)}`).then(r => r.json()),
                                         new Promise(res => setTimeout(res, 1200)),
                                       ]).then(([data]) => {
                                         if (data.error) { showToast(data.error); setAiStep("form"); return; }
                                         setAiResults(data);
                                         setAiStep("result");
                                         const dong = aiDong.trim();
-                                        const gu = polygonGroupsRef.current.find((g) => g.dongName === dong)?.guName ?? "";
-                                        const indF = fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(dong)}`).then(r => r.json()).catch(() => null);
+                                        const gu = aiDongGu || polygonGroupsRef.current.find((g) => g.dongName === dong)?.guName || "";
+                                        const indF = fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(dongKey(dong, gu))}`).then(r => r.json()).catch(() => null);
                                         const regF = gu ? fetch(`${API}/api/recommend/location/?업종=${encodeURIComponent(ind.category)}&gu=${encodeURIComponent(gu)}`).then(r => r.json()).catch(() => null) : Promise.resolve(null);
                                         Promise.all([indF, regF]).then(([indData, regData]) => {
                                           setAiScoreSuggestions({
@@ -5748,7 +5758,7 @@ export default function MapPage() {
                               setAiScoreSuggestions({ regions: [], industries: [] });
                               setAiStep("loading");
                               Promise.all([
-                                fetch(`${API}/api/recommend/score/?dong=${encodeURIComponent(aiDong.trim())}&category=${encodeURIComponent(cat)}`).then((r) => r.json()),
+                                fetch(`${API}/api/recommend/score/?dong=${encodeURIComponent(dongKey(aiDong.trim(), aiDongGu))}&category=${encodeURIComponent(cat)}`).then((r) => r.json()),
                                 new Promise((res) => setTimeout(res, 1200)),
                               ])
                                 .then(([data]) => {
@@ -5756,9 +5766,9 @@ export default function MapPage() {
                                   setAiResults(data);
                                   setAiStep("result");
                                   const dong = aiDong.trim();
-                                  const gu = polygonGroupsRef.current.find((g) => g.dongName === dong)?.guName ?? "";
+                                  const gu = aiDongGu || polygonGroupsRef.current.find((g) => g.dongName === dong)?.guName || "";
                                   Promise.all([
-                                    fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(dong)}`).then(r => r.json()).catch(() => null),
+                                    fetch(`${API}/api/recommend/industry/?dong=${encodeURIComponent(dongKey(dong, gu))}`).then(r => r.json()).catch(() => null),
                                     gu ? fetch(`${API}/api/recommend/location/?업종=${encodeURIComponent(cat)}&gu=${encodeURIComponent(gu)}`).then(r => r.json()).catch(() => null) : Promise.resolve(null),
                                   ]).then(([indData, regData]) => {
                                     setAiScoreSuggestions({

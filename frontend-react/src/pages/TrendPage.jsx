@@ -384,7 +384,7 @@ export default function TrendPage() {
       : regionDong ? [regionDong] : [];
     if (dongs.length === 0) return;
     const dongsParam = dongs.join(",");
-    const qs = `?dongs=${encodeURIComponent(dongsParam)}`;
+    const qs = `?dongs=${encodeURIComponent(dongsParam)}&gu=${encodeURIComponent(regionGu)}`;
     setMzVisible(PAGE_SIZE);
     fetch(`${API}/api/trend/weekday-industries/${qs}`)
       .then((r) => r.json())
@@ -403,6 +403,7 @@ export default function TrendPage() {
     const params = new URLSearchParams();
     if (ageCategory) params.set("category", ageCategory);
     params.set("dongs", dongs.join(","));
+    params.set("gu", regionGu);
     setAgeLoading(true);
     fetch(`${API}/api/trend/age-breakdown/?${params}`)
       .then((r) => r.json())
@@ -417,6 +418,7 @@ export default function TrendPage() {
     const params = new URLSearchParams();
     if (timeCategory) params.set("category", timeCategory);
     params.set("dongs", dongs.join(","));
+    params.set("gu", regionGu);
     setTimeLoading(true);
     fetch(`${API}/api/trend/time-breakdown/?${params}`)
       .then((r) => r.json())
@@ -430,6 +432,7 @@ export default function TrendPage() {
     if (dongs.length === 0) return;
     const params = new URLSearchParams();
     params.set("dongs", dongs.join(","));
+    params.set("gu", regionGu);
     setGenderLoading(true);
     setGenderVisible(PAGE_SIZE);
     fetch(`${API}/api/trend/gender-breakdown/?${params}`)
@@ -445,6 +448,7 @@ export default function TrendPage() {
     const params = new URLSearchParams();
     if (weekdayPatternCategory) params.set("category", weekdayPatternCategory);
     params.set("dongs", dongs.join(","));
+    params.set("gu", regionGu);
     setWeekdayPatternLoading(true);
     fetch(`${API}/api/trend/weekday-pattern/?${params}`)
       .then((r) => r.json())
@@ -458,6 +462,7 @@ export default function TrendPage() {
     if (dongs.length === 0) return;
     const params = new URLSearchParams();
     params.set("dongs", dongs.join(","));
+    params.set("gu", regionGu);
     setOpenCloseLoading(true);
     setOpenCloseVisible(PAGE_SIZE);
     fetch(`${API}/api/trend/open-close/?${params}`)
@@ -472,6 +477,7 @@ export default function TrendPage() {
     if (dongs.length === 0) return;
     const params = new URLSearchParams();
     params.set("dongs", dongs.join(","));
+    params.set("gu", regionGu);
     setSalesPerStoreLoading(true);
     setSalesPerStoreVisible(PAGE_SIZE);
     fetch(`${API}/api/trend/sales-per-store/?${params}`)

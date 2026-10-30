@@ -112,10 +112,12 @@ def _get_dong_centroids() -> dict:
             with open(_HANGJEONGDONG_GEOJSON, encoding="utf-8") as f:
                 gj = json.load(f)
             for feat in gj.get("features", []):
-                name = feat.get("properties", {}).get("dong_name", "")
+                props = feat.get("properties", {})
+                name = props.get("dong_name", "")
                 if not name:
                     continue
                 name = normalize_dong(name)
+                gu_name = props.get("gu_name", "")
                 geom = feat.get("geometry", {})
                 coords = []
                 if geom.get("type") == "MultiPolygon":
@@ -134,7 +136,7 @@ def _get_dong_centroids() -> dict:
                 dlat = (max(lats) - min(lats)) / 2 * 111_000
                 dlng = (max(lngs) - min(lngs)) / 2 * 88_000
                 radius = int(max(300, min(math.sqrt(dlat**2 + dlng**2), 2000)))
-                result[name] = {
+                result[(gu_name, name)] = {
                     "lng": cx, "lat": cy, "radius": radius,
                     "bbox": (min(lats), max(lats), min(lngs), max(lngs)),
                     "polygon": shapely_shape(feat["geometry"]),
@@ -226,6 +228,112 @@ _GU_CODE_MAP = {
     "11740": "강동구",
 }
 
+
+# ── 행정동은 이름이 아니라 행정동코드로 구분한다 (2026-10-28) ──
+# 서울에는 이름이 같은 행정동이 있다(신사동: 강남구 11680510, 관악구 11620685).
+# 이름만으로 조회하면 두 동의 데이터가 섞이거나 한쪽이 덮어써지므로,
+# 요청으로 들어온 '구 + 동 이름'을 상권 데이터(CommercialData)의 행정동코드로 바꿔서 쓴다.
+_dong_code_index = None
+_dong_code_index_lock = threading.Lock()
+
+
+def _gu_code_range(gu_name):
+    """구 이름 → 그 구의 행정동코드 범위 (시작, 끝). 모르는 구면 None"""
+    gu_prefix = next((k for k, v in _GU_CODE_MAP.items() if v == gu_name), None)
+    if not gu_prefix:
+        return None
+    start = int(gu_prefix) * 1000
+    return start, start + 1000
+
+
+def _gu_of_code(code):
+    """행정동코드 → 구 이름"""
+    return _GU_CODE_MAP.get(str(int(code) // 1000), "") if code else ""
+
+
+def _get_dong_code_index():
+    """행정동명 → [행정동코드, ...] 색인 (상권 데이터 기준, 처음 한 번 만들어 재사용)"""
+    global _dong_code_index
+    if _dong_code_index is not None:
+        return _dong_code_index
+    with _dong_code_index_lock:
+        if _dong_code_index is None:
+            index = {}
+            for code, name in CommercialData.objects.values_list("행정동코드", "행정동명").distinct():
+                if name:
+                    index.setdefault(name, []).append(code)
+            for codes in index.values():
+                codes.sort()
+            _dong_code_index = index
+    return _dong_code_index
+
+
+def _split_gu_prefix(name, gu=None):
+    """'강남구 신사동'처럼 구가 앞에 붙은 입력을 (구, 동)으로 나눈다."""
+    name = (name or "").strip()
+    if " " in name:
+        head, tail = name.split(None, 1)
+        if head in _GU_CODE_MAP.values():
+            return head, tail.strip()
+    return gu, name
+
+
+def resolve_dong(raw_name, gu=None):
+    """동 이름(+구) → (행정동코드, 동 이름, 오류 응답)
+    - 하나로 정해지면 (코드, 이름, None)
+    - 같은 이름이 여러 구에 있는데 구가 없으면 (None, 이름, 400 응답).
+      두 동을 섞어서 보여주는 대신 구를 고르게 한다.
+    - 데이터에 없는 이름이면 (None, 이름, None)
+    """
+    gu, name = _split_gu_prefix(raw_name, (gu or "").strip() or None)
+    name = normalize_dong(name)
+    if not name:
+        return None, name, None
+    codes = _get_dong_code_index().get(name, [])
+    if gu:
+        rng = _gu_code_range(gu)
+        if rng:
+            codes = [c for c in codes if rng[0] <= c < rng[1]]
+    if len(codes) == 1:
+        return codes[0], name, None
+    if len(codes) > 1:
+        gus = [_gu_of_code(c) for c in codes]
+        return None, name, JsonResponse({
+            "error": f"'{name}'은(는) {'·'.join(gus)}에 모두 있습니다. '{gus[0]} {name}'처럼 구를 함께 입력하거나 목록에서 골라 주세요.",
+            "candidates": [{"gu": _gu_of_code(c), "dong": name, "code": c} for c in codes],
+        }, status=400)
+    return None, name, None
+
+
+def _codes_for(names, gu=None):
+    """동 이름 목록(+구) → 행정동코드 목록. 구를 주면 그 구에 속한 동만 고른다."""
+    index = _get_dong_code_index()
+    rng = _gu_code_range(gu) if gu else None
+    codes = []
+    for n in names:
+        for c in index.get(normalize_dong(n), []):
+            if rng is None or rng[0] <= c < rng[1]:
+                codes.append(c)
+    return codes
+
+
+def _codes_in_gu(gu_name):
+    """구 이름 → 그 구에 속한 모든 행정동코드"""
+    rng = _gu_code_range(gu_name)
+    if not rng:
+        return []
+    return sorted(c for codes in _get_dong_code_index().values() for c in codes if rng[0] <= c < rng[1])
+
+
+def _dong_centroid(name, gu=None):
+    """(구, 동 이름) → 지도 중심점·경계. 구 없이 이름이 여러 구에 있으면 None"""
+    cents = _get_dong_centroids()
+    name = normalize_dong(name)
+    if gu:
+        return cents.get((gu, name))
+    matches = [c for (g, n), c in cents.items() if n == name]
+    return matches[0] if len(matches) == 1 else None
+
 def _get_location_df():
     global _location_df
     if _location_df is not None:
@@ -263,13 +371,15 @@ def normalize_dong(name: str) -> str:
 
 
 def quarters(request):
-    dong = normalize_dong(request.GET.get("dong"))
+    code, dong, err = resolve_dong(request.GET.get("dong"), request.GET.get("gu"))
+    if err:
+        return err
     if not dong:
         return JsonResponse({"error": "dong 파라미터가 필요합니다."}, status=400)
 
     qs = list(
         CommercialData.objects
-        .filter(행정동명=dong)
+        .filter(행정동코드=code)
         .values_list("기준_년분기_코드", flat=True)
         .distinct()
         .order_by("-기준_년분기_코드")
@@ -277,7 +387,9 @@ def quarters(request):
     return JsonResponse({"quarters": qs})
 
 def analysis(request):
-    dong = normalize_dong(request.GET.get("dong"))
+    code, dong, err = resolve_dong(request.GET.get("dong"), request.GET.get("gu"))
+    if err:
+        return err
     quarter_param = request.GET.get("quarter")
     if not dong:
         return JsonResponse({"error": "dong 파라미터가 필요합니다."}, status=400)
@@ -286,7 +398,7 @@ def analysis(request):
     if quarter_param:
         try:
             target = int(quarter_param)
-            if not CommercialData.objects.filter(행정동명=dong, 기준_년분기_코드=target).exists():
+            if not CommercialData.objects.filter(행정동코드=code, 기준_년분기_코드=target).exists():
                 target = None
         except ValueError:
             target = None
@@ -296,7 +408,7 @@ def analysis(request):
     if not target:
         target = (
             CommercialData.objects
-            .filter(행정동명=dong)
+            .filter(행정동코드=code)
             .order_by("-기준_년분기_코드")
             .values_list("기준_년분기_코드", flat=True)
             .first()
@@ -307,7 +419,7 @@ def analysis(request):
     # 업종별 데이터
     rows = list(
         CommercialData.objects
-        .filter(행정동명=dong, 기준_년분기_코드=target)
+        .filter(행정동코드=code, 기준_년분기_코드=target)
         .values("통합카테고리", "당월매출합", "점포수")
         .order_by("-당월매출합")
     )
@@ -316,7 +428,7 @@ def analysis(request):
     from django.db.models import Sum
     agg = (
         CommercialData.objects
-        .filter(행정동명=dong, 기준_년분기_코드=target)
+        .filter(행정동코드=code, 기준_년분기_코드=target)
         .aggregate(
             남성매출합=Sum("남성매출합"),
             여성매출합=Sum("여성매출합"),
@@ -334,7 +446,7 @@ def analysis(request):
     # 해당 행정동 총 매출
     총매출 = (
         CommercialData.objects
-        .filter(행정동명=dong, 기준_년분기_코드=target)
+        .filter(행정동코드=code, 기준_년분기_코드=target)
         .values_list("행정동_전체매출", flat=True)
         .first() or 0
     )
@@ -343,7 +455,7 @@ def analysis(request):
     dong_revenues = (
         CommercialData.objects
         .filter(기준_년분기_코드=target)
-        .values("행정동명")
+        .values("행정동코드")
         .annotate(총매출=Max("행정동_전체매출"))
     )
     전체동수 = dong_revenues.count()
@@ -354,7 +466,7 @@ def analysis(request):
     prev_yoy_target = target - 10
     prev_yoy_총매출 = (
         CommercialData.objects
-        .filter(행정동명=dong, 기준_년분기_코드=prev_yoy_target)
+        .filter(행정동코드=code, 기준_년분기_코드=prev_yoy_target)
         .values_list("행정동_전체매출", flat=True)
         .first() or 0
     )
@@ -362,6 +474,7 @@ def analysis(request):
 
     return JsonResponse({
         "dong": dong,
+        "gu": _gu_of_code(code),
         "총매출": 총매출,
         "순위": 순위,
         "전체동수": 전체동수,
@@ -393,9 +506,10 @@ def gu_quarters(request):
     if not dongs_param:
         return JsonResponse({"error": "dongs 파라미터가 필요합니다."}, status=400)
     dongs = [normalize_dong(d.strip()) for d in dongs_param.split(",") if d.strip()]
+    codes = _codes_for(dongs, request.GET.get("gu", "").strip() or None)
     qs = list(
         CommercialData.objects
-        .filter(행정동명__in=dongs)
+        .filter(행정동코드__in=codes)
         .values_list("기준_년분기_코드", flat=True)
         .distinct()
         .order_by("-기준_년분기_코드")
@@ -421,12 +535,15 @@ def gu_analysis(request):
     if not gu or not dongs:
         return JsonResponse({"error": "gu, dongs 필요"}, status=400)
 
+    # 구 안의 동만 행정동코드로 고른다 (다른 구의 같은 이름 동이 섞이지 않게)
+    codes = _codes_for(dongs, gu)
+
     # 분기 결정
     target = None
     if quarter_param:
         try:
             target = int(quarter_param)
-            if not CommercialData.objects.filter(행정동명__in=dongs, 기준_년분기_코드=target).exists():
+            if not CommercialData.objects.filter(행정동코드__in=codes, 기준_년분기_코드=target).exists():
                 target = None
         except (ValueError, TypeError):
             target = None
@@ -434,7 +551,7 @@ def gu_analysis(request):
     if not target:
         target = (
             CommercialData.objects
-            .filter(행정동명__in=dongs)
+            .filter(행정동코드__in=codes)
             .order_by("-기준_년분기_코드")
             .values_list("기준_년분기_코드", flat=True)
             .first()
@@ -445,7 +562,7 @@ def gu_analysis(request):
     # 구 내 업종별 합계
     industries = list(
         CommercialData.objects
-        .filter(행정동명__in=dongs, 기준_년분기_코드=target)
+        .filter(행정동코드__in=codes, 기준_년분기_코드=target)
         .values("통합카테고리")
         .annotate(당월매출합=Sum("당월매출합"), 점포수=Sum("점포수"))
         .order_by("-당월매출합")
@@ -457,21 +574,20 @@ def gu_analysis(request):
     전체구수 = len(gu_dongs_map) if gu_dongs_map else 25
     if gu_dongs_map:
         # 모든 구의 행정동을 한 번에 조회해 집계
-        all_dong_to_gu = {}
+        code_to_gu = {}
         for gu_name, dong_list in gu_dongs_map.items():
-            for dong in dong_list:
-                all_dong_to_gu[dong] = gu_name
-        all_dongs = list(all_dong_to_gu.keys())
+            for c in _codes_for(dong_list, gu_name):
+                code_to_gu[c] = gu_name
 
         dong_totals = (
             CommercialData.objects
-            .filter(행정동명__in=all_dongs, 기준_년분기_코드=target)
-            .values("행정동명")
+            .filter(행정동코드__in=list(code_to_gu), 기준_년분기_코드=target)
+            .values("행정동코드")
             .annotate(total=Sum("당월매출합"))
         )
         gu_totals = {}
         for row in dong_totals:
-            gn = all_dong_to_gu[row["행정동명"]]
+            gn = code_to_gu[row["행정동코드"]]
             gu_totals[gn] = gu_totals.get(gn, 0) + row["total"]
 
         상위구수 = sum(1 for v in gu_totals.values() if v > 총매출)
@@ -482,7 +598,7 @@ def gu_analysis(request):
     prev_yoy_target = target - 10
     prev_industries = (
         CommercialData.objects
-        .filter(행정동명__in=dongs, 기준_년분기_코드=prev_yoy_target)
+        .filter(행정동코드__in=codes, 기준_년분기_코드=prev_yoy_target)
         .values("통합카테고리")
         .annotate(당월매출합=Sum("당월매출합"))
     )
@@ -514,15 +630,15 @@ def gu_all_ranking(request):
     if not gu_dongs_map:
         return JsonResponse({"rankings": []})
 
-    all_dong_to_gu = {}
+    code_to_gu = {}
     for gu_name, dong_list in gu_dongs_map.items():
-        for dong in dong_list:
-            all_dong_to_gu[dong] = gu_name
-    all_dongs = list(all_dong_to_gu.keys())
+        for c in _codes_for(dong_list, gu_name):
+            code_to_gu[c] = gu_name
+    all_codes = list(code_to_gu)
 
     latest_quarter = (
         CommercialData.objects
-        .filter(행정동명__in=all_dongs)
+        .filter(행정동코드__in=all_codes)
         .order_by("-기준_년분기_코드")
         .values_list("기준_년분기_코드", flat=True)
         .first()
@@ -532,13 +648,13 @@ def gu_all_ranking(request):
 
     dong_totals = (
         CommercialData.objects
-        .filter(행정동명__in=all_dongs, 기준_년분기_코드=latest_quarter)
-        .values("행정동명")
+        .filter(행정동코드__in=all_codes, 기준_년분기_코드=latest_quarter)
+        .values("행정동코드")
         .annotate(total=Sum("당월매출합"))
     )
     gu_totals = {}
     for row in dong_totals:
-        gn = all_dong_to_gu.get(row["행정동명"])
+        gn = code_to_gu.get(row["행정동코드"])
         if gn:
             gu_totals[gn] = gu_totals.get(gn, 0) + row["total"]
 
@@ -555,12 +671,14 @@ def gu_all_ranking(request):
 
 def score(request):
     """창업 적합도 점수 (GET, dong + category 필수)"""
-    dong = normalize_dong(request.GET.get("dong"))
+    code, dong, err = resolve_dong(request.GET.get("dong"), request.GET.get("gu"))
+    if err:
+        return err
     category = request.GET.get("category")
     if not dong or not category:
         return JsonResponse({"error": "dong, category 파라미터가 필요합니다."}, status=400)
 
-    obj = ScoreData.objects.filter(행정동명=dong, 통합카테고리=category).first()
+    obj = ScoreData.objects.filter(행정동코드=code, 통합카테고리=category).first()
     if not obj:
         return JsonResponse({"error": "데이터 없음"}, status=404)
 
@@ -578,13 +696,15 @@ def score(request):
 
 def score_all(request):
     """행정동 내 전체 업종 점수 목록 (GET, dong 필수)"""
-    dong = normalize_dong(request.GET.get("dong"))
+    code, dong, err = resolve_dong(request.GET.get("dong"), request.GET.get("gu"))
+    if err:
+        return err
     if not dong:
         return JsonResponse({"error": "dong 파라미터가 필요합니다."}, status=400)
 
     rows = list(
         ScoreData.objects
-        .filter(행정동명=dong)
+        .filter(행정동코드=code)
         .values("통합카테고리", "성장확률", "업종내_순위", "업종내_전체동수", "상위_퍼센트", "등급")
         .order_by("업종내_순위")
     )
@@ -596,7 +716,9 @@ def store_list(request):
     from django.core.cache import cache
     from shapely.geometry import Point
 
-    dong = normalize_dong(request.GET.get("dong"))
+    code, dong, err = resolve_dong(request.GET.get("dong"), request.GET.get("gu"))
+    if err:
+        return err
     category = request.GET.get("category", "").strip()
 
     if not dong:
@@ -604,12 +726,12 @@ def store_list(request):
     if not category:
         return JsonResponse({"error": "category 파라미터가 필요합니다."}, status=400)
 
-    cache_key = f"kakao_stores_{dong}_{category}"
+    cache_key = f"kakao_stores_{code or dong}_{category}"
     cached = cache.get(cache_key)
     if cached is not None:
         return JsonResponse({"stores": cached, "total": len(cached)})
 
-    centroid = _get_dong_centroids().get(dong)
+    centroid = _dong_centroid(dong, _gu_of_code(code) or None)
     if not centroid:
         return JsonResponse({"stores": [], "total": 0})
 
@@ -860,11 +982,11 @@ def recommend_location(request):
     # CommercialData/ScoreData 조회용 카테고리 (구분류 체계)
     commercial_카테고리 = STORE_TO_COMMERCIAL_CAT.get(통합카테고리, 통합카테고리)
 
-    # 2. ScoreData: 통합카테고리 기반 AI 성장확률 (행정동별)
+    # 2. ScoreData: 통합카테고리 기반 AI 성장확률 (행정동코드별)
     score_map = {
-        row["행정동명"]: row
+        row["행정동코드"]: row
         for row in ScoreData.objects.filter(통합카테고리=commercial_카테고리).values(
-            "행정동명", "성장확률", "등급", "상위_퍼센트"
+            "행정동코드", "성장확률", "등급", "상위_퍼센트"
         )
     }
 
@@ -882,7 +1004,7 @@ def recommend_location(request):
         return JsonResponse({"error": "분석 데이터가 없습니다."}, status=404)
 
     commercial_map = {
-        row["행정동명"]: row
+        row["행정동코드"]: row
         for row in cd_qs.filter(기준_년분기_코드=latest_q).values(
             "행정동명", "행정동코드", "당월매출합", "총유동인구", "업종_포화도",
             "경쟁강도", "점포수", "행정동_전체점포수", "업종_점포당매출",
@@ -890,32 +1012,32 @@ def recommend_location(request):
     }
 
     # 4. 후보 행정동: ScoreData + CommercialData 교집합
-    candidate_dongs = set(score_map.keys()) & set(commercial_map.keys())
-    if not candidate_dongs and gu_filter:
+    candidate_codes = set(score_map.keys()) & set(commercial_map.keys())
+    if not candidate_codes and gu_filter:
         # 구 내 교집합이 없으면 서울 전체 기준으로 재조회
         latest_q_all = CommercialData.objects.filter(통합카테고리=commercial_카테고리).aggregate(max=Max("기준_년분기_코드"))["max"]
         if latest_q_all:
             commercial_map = {
-                row["행정동명"]: row
+                row["행정동코드"]: row
                 for row in CommercialData.objects.filter(통합카테고리=commercial_카테고리, 기준_년분기_코드=latest_q_all).values(
                     "행정동명", "행정동코드", "당월매출합", "총유동인구", "업종_포화도",
                     "경쟁강도", "점포수", "행정동_전체점포수", "업종_점포당매출",
                 )
             }
-            candidate_dongs = set(score_map.keys()) & set(commercial_map.keys())
-    if not candidate_dongs:
+            candidate_codes = set(score_map.keys()) & set(commercial_map.keys())
+    if not candidate_codes:
         return JsonResponse({"error": "추천할 수 있는 상권 데이터가 없습니다."}, status=404)
 
     # 로컬 정규화 최대값 (후보 행정동 기준)
-    max_유동   = max((commercial_map[d]["총유동인구"] or 0) for d in candidate_dongs) or 1
-    max_포화도 = max((commercial_map[d]["업종_포화도"] or 0) for d in candidate_dongs) or 1
-    max_소분류 = max((commercial_map[d]["점포수"] or 0) for d in candidate_dongs) or 1
-    max_경쟁   = max((commercial_map[d]["경쟁강도"] or 0) for d in candidate_dongs) or 1
+    max_유동   = max((commercial_map[d]["총유동인구"] or 0) for d in candidate_codes) or 1
+    max_포화도 = max((commercial_map[d]["업종_포화도"] or 0) for d in candidate_codes) or 1
+    max_소분류 = max((commercial_map[d]["점포수"] or 0) for d in candidate_codes) or 1
+    max_경쟁   = max((commercial_map[d]["경쟁강도"] or 0) for d in candidate_codes) or 1
 
     results = []
-    for dong in candidate_dongs:
-        c = commercial_map[dong]
-        s = score_map.get(dong, {})
+    for code in candidate_codes:
+        c = commercial_map[code]
+        s = score_map.get(code, {})
 
         성장확률      = s.get("성장확률") or 50.0
         유동인구      = c.get("총유동인구") or 0
@@ -931,11 +1053,10 @@ def recommend_location(request):
             성장확률 * 0.40 + 소분류경쟁_점수 * 0.30 + 유동인구_점수 * 0.15 + 포화도_점수 * 0.15, 1
         )
 
-        dong_code = c.get("행정동코드") or 0
-        gu_prefix = str(int(dong_code) // 1000) if dong_code else ""
         results.append({
-            "dongName": dong,
-            "guName": _GU_CODE_MAP.get(gu_prefix, ""),
+            "dongName": c["행정동명"],
+            "dongCode": code,
+            "guName": _gu_of_code(code),
             "score": composite,
             "성장확률": round(성장확률, 1),
             "등급": s.get("등급", "-"),
@@ -1007,8 +1128,8 @@ def recommend_gu(request):
 
     # ScoreData: 행정동별 성장확률
     score_map = {
-        row["행정동명"]: row["성장확률"]
-        for row in ScoreData.objects.filter(통합카테고리=commercial_카테고리).values("행정동명", "성장확률")
+        row["행정동코드"]: row["성장확률"]
+        for row in ScoreData.objects.filter(통합카테고리=commercial_카테고리).values("행정동코드", "성장확률")
     }
 
     # 행정동 → 구 코드 매핑 후 구별 집계
@@ -1027,7 +1148,7 @@ def recommend_gu(request):
         b["포화도합"]  += row.get("업종_포화도") or 0
         b["점포수합"]  += row.get("점포수") or 0
         b["행정동수"]  += 1
-        성장확률 = score_map.get(row["행정동명"])
+        성장확률 = score_map.get(row["행정동코드"])
         if 성장확률 is not None:
             b["성장확률합"]   += 성장확률
             b["score행정동수"] += 1
@@ -1089,14 +1210,16 @@ def recommend_gu(request):
 
 def recommend_industry(request):
     """행정동 입력 → 유망 업종 추천 (GET, dong 필수)"""
-    dong = normalize_dong(request.GET.get("dong", "").strip())
+    code, dong, err = resolve_dong(request.GET.get("dong", "").strip(), request.GET.get("gu"))
+    if err:
+        return err
     if not dong:
         return JsonResponse({"error": "dong 파라미터가 필요합니다."}, status=400)
 
     # ScoreData: 해당 행정동의 모든 업종 성장확률
     score_map = {
         row["통합카테고리"]: row
-        for row in ScoreData.objects.filter(행정동명=dong).values(
+        for row in ScoreData.objects.filter(행정동코드=code).values(
             "통합카테고리", "성장확률", "등급", "상위_퍼센트"
         )
     }
@@ -1106,7 +1229,7 @@ def recommend_industry(request):
     # CommercialData: 최신 분기 해당 행정동 전 업종
     latest_q = (
         CommercialData.objects
-        .filter(행정동명=dong)
+        .filter(행정동코드=code)
         .aggregate(max=Max("기준_년분기_코드"))["max"]
     )
     if not latest_q:
@@ -1114,7 +1237,7 @@ def recommend_industry(request):
 
     commercial_map = {
         row["통합카테고리"]: row
-        for row in CommercialData.objects.filter(행정동명=dong, 기준_년분기_코드=latest_q).values(
+        for row in CommercialData.objects.filter(행정동코드=code, 기준_년분기_코드=latest_q).values(
             "통합카테고리", "당월매출합", "총유동인구", "업종_포화도", "경쟁강도", "점포수"
         )
     }
@@ -1191,7 +1314,7 @@ def recommend_industry(request):
             "높음"
         )
 
-    return JsonResponse({"results": top, "dong": dong, "quarter": latest_q})
+    return JsonResponse({"results": top, "dong": dong, "gu": _gu_of_code(code), "quarter": latest_q})
 
 
 def recommend_gu_industry(request):
@@ -1216,21 +1339,21 @@ def recommend_gu_industry(request):
     if not latest_q:
         return JsonResponse({"error": "해당 구의 상권 데이터가 없습니다."}, status=404)
 
-    dongs_in_gu = list(
+    codes_in_gu = list(
         CommercialData.objects
         .filter(행정동코드__gte=code_min, 행정동코드__lt=code_max, 기준_년분기_코드=latest_q)
-        .values_list("행정동명", flat=True)
+        .values_list("행정동코드", flat=True)
         .distinct()
     )
 
     # ScoreData: 구 내 행정동 평균 성장확률 per 통합카테고리
     score_agg = list(
         ScoreData.objects
-        .filter(행정동명__in=dongs_in_gu)
+        .filter(행정동코드__in=codes_in_gu)
         .values("통합카테고리")
         .annotate(
             avg_성장확률=Avg("성장확률"),
-            dong_count=Count("행정동명"),
+            dong_count=Count("행정동코드"),
         )
     )
     if not score_agg:
@@ -1283,19 +1406,21 @@ def recommend_gu_industry(request):
 
 def recommend_score(request):
     """행정동+업종 적합도 점수 (GET, dong + category 필수)"""
-    dong = normalize_dong(request.GET.get("dong", "").strip())
+    code, dong, err = resolve_dong(request.GET.get("dong", "").strip(), request.GET.get("gu"))
+    if err:
+        return err
     category = request.GET.get("category", "").strip()
     if not dong or not category:
         return JsonResponse({"error": "dong, category 파라미터가 필요합니다."}, status=400)
 
-    score_obj = ScoreData.objects.filter(행정동명=dong, 통합카테고리=category).first()
+    score_obj = ScoreData.objects.filter(행정동코드=code, 통합카테고리=category).first()
 
     latest_q = (
         CommercialData.objects
         .filter(통합카테고리=category)
         .aggregate(max=Max("기준_년분기_코드"))["max"]
     )
-    c = CommercialData.objects.filter(행정동명=dong, 통합카테고리=category, 기준_년분기_코드=latest_q).first()
+    c = CommercialData.objects.filter(행정동코드=code, 통합카테고리=category, 기준_년분기_코드=latest_q).first()
 
     # 전국 기준 정규화 최대값 (recommend_location과 동일한 변수 기준)
     all_rows = list(
@@ -1319,7 +1444,7 @@ def recommend_score(request):
 
     if c is None:
         # CommercialData 없음 → 해당 동 전체 데이터 + 업종 서울 평균으로 대체
-        dong_c = CommercialData.objects.filter(행정동명=dong, 기준_년분기_코드=latest_q).first()
+        dong_c = CommercialData.objects.filter(행정동코드=code, 기준_년분기_코드=latest_q).first()
         avg_agg = CommercialData.objects.filter(통합카테고리=category, 기준_년분기_코드=latest_q).aggregate(
             avg_매출=Avg("당월매출합"), avg_유동=Avg("총유동인구"),
             avg_점포수=Avg("점포수"), avg_포화=Avg("업종_포화도"),
@@ -1559,7 +1684,9 @@ def recommend_spot(request):
     """행정동 + 업종 → 행정동 내 추천 위치 반환 (GET)
     params: dong (행정동명), category (통합카테고리)
     """
-    dong     = normalize_dong(request.GET.get("dong", "").strip())
+    code, dong, err = resolve_dong(request.GET.get("dong", "").strip(), request.GET.get("gu"))
+    if err:
+        return err
     category = request.GET.get("category", "").strip()
     if not dong or not category:
         return JsonResponse({"error": "dong, category 파라미터가 필요합니다."}, status=400)
@@ -1569,6 +1696,16 @@ def recommend_spot(request):
         return JsonResponse({"error": "위치 점수 데이터가 없습니다. build_location_scores.py를 먼저 실행하세요."}, status=503)
 
     filtered = df[(df["행정동명"] == dong) & (df["통합카테고리"] == category)]
+    if len(_get_dong_code_index().get(dong, [])) > 1 and not filtered.empty:
+        # 이름이 겹치는 동(신사동)은 위치 점수 파일만으로 구를 알 수 없으니 경계 안의 격자만 남긴다
+        from shapely.geometry import Point
+        centroid = _dong_centroid(dong, _gu_of_code(code) or None)
+        polygon = centroid.get("polygon") if centroid else None
+        if polygon is None:
+            filtered = filtered.iloc[0:0]
+        else:
+            inside = [polygon.contains(Point(lng, lat)) for lat, lng in zip(filtered["grid_lat"], filtered["grid_lng"])]
+            filtered = filtered[inside]
     if filtered.empty:
         return JsonResponse({"error": f'"{dong}"의 "{category}" 위치 데이터가 없습니다.'}, status=404)
 
@@ -2244,10 +2381,11 @@ def trend_gu_industries(request):
 
     if not dongs:
         return JsonResponse({"results": []})
+    codes = _codes_for(dongs, gu or None)
 
     quarters = list(
         CommercialData.objects
-        .filter(행정동명__in=dongs)
+        .filter(행정동코드__in=codes)
         .values_list("기준_년분기_코드", flat=True)
         .distinct()
         .order_by("-기준_년분기_코드")[:2]
@@ -2260,7 +2398,7 @@ def trend_gu_industries(request):
 
     latest = list(
         CommercialData.objects
-        .filter(행정동명__in=dongs, 기준_년분기_코드=latest_q)
+        .filter(행정동코드__in=codes, 기준_년분기_코드=latest_q)
         .values("통합카테고리")
         .annotate(매출=Sum("당월매출합"), 점포=Sum("점포수"))
         .order_by("-매출")
@@ -2270,7 +2408,7 @@ def trend_gu_industries(request):
     if prev_q:
         for r in (
             CommercialData.objects
-            .filter(행정동명__in=dongs, 기준_년분기_코드=prev_q)
+            .filter(행정동코드__in=codes, 기준_년분기_코드=prev_q)
             .values("통합카테고리")
             .annotate(매출=Sum("당월매출합"), 점포=Sum("점포수"))
         ):
@@ -2280,8 +2418,8 @@ def trend_gu_industries(request):
     best_dong = {}
     for r in (
         CommercialData.objects
-        .filter(행정동명__in=dongs, 기준_년분기_코드=latest_q)
-        .values("통합카테고리", "행정동명")
+        .filter(행정동코드__in=codes, 기준_년분기_코드=latest_q)
+        .values("통합카테고리", "행정동코드", "행정동명")
         .annotate(매출=Sum("당월매출합"))
         .order_by("통합카테고리", "-매출")
     ):
@@ -2374,7 +2512,7 @@ def trend_weekday_industries(request):
     qs = CommercialData.objects.filter(기준_년분기_코드=latest_q).exclude(주중매출합__isnull=True)
     if dongs_param:
         dongs = [normalize_dong(d) for d in dongs_param.split(",") if d.strip()]
-        qs = qs.filter(행정동명__in=dongs)
+        qs = qs.filter(행정동코드__in=_codes_for(dongs, request.GET.get("gu", "").strip() or None))
 
     rows = list(
         qs
@@ -2407,7 +2545,7 @@ def trend_weekend_industries(request):
     qs = CommercialData.objects.filter(기준_년분기_코드=latest_q).exclude(주말매출합__isnull=True)
     if dongs_param:
         dongs = [normalize_dong(d) for d in dongs_param.split(",") if d.strip()]
-        qs = qs.filter(행정동명__in=dongs)
+        qs = qs.filter(행정동코드__in=_codes_for(dongs, request.GET.get("gu", "").strip() or None))
 
     rows = list(
         qs
@@ -2443,7 +2581,7 @@ def trend_age_breakdown(request):
         qs = qs.filter(통합카테고리=category)
     if dongs_param:
         dongs = [normalize_dong(d) for d in dongs_param.split(",") if d.strip()]
-        qs = qs.filter(행정동명__in=dongs)
+        qs = qs.filter(행정동코드__in=_codes_for(dongs, request.GET.get("gu", "").strip() or None))
 
     agg = qs.aggregate(
         a10=Sum("매출_10대합"),
@@ -2479,7 +2617,7 @@ def trend_time_breakdown(request):
         qs = qs.filter(통합카테고리=category)
     if dongs_param:
         dongs = [normalize_dong(d) for d in dongs_param.split(",") if d.strip()]
-        qs = qs.filter(행정동명__in=dongs)
+        qs = qs.filter(행정동코드__in=_codes_for(dongs, request.GET.get("gu", "").strip() or None))
 
     agg = qs.aggregate(
         t0006=Sum("시간대_00_06_매출"),
@@ -2512,7 +2650,7 @@ def trend_gender_breakdown(request):
     qs = CommercialData.objects.filter(기준_년분기_코드=latest_q).exclude(남성매출합__isnull=True)
     if dongs_param:
         dongs = [normalize_dong(d) for d in dongs_param.split(",") if d.strip()]
-        qs = qs.filter(행정동명__in=dongs)
+        qs = qs.filter(행정동코드__in=_codes_for(dongs, request.GET.get("gu", "").strip() or None))
 
     rows = list(
         qs.values("통합카테고리")
@@ -2545,7 +2683,7 @@ def trend_weekday_pattern(request):
         qs = qs.filter(통합카테고리=category)
     if dongs_param:
         dongs = [normalize_dong(d) for d in dongs_param.split(",") if d.strip()]
-        qs = qs.filter(행정동명__in=dongs)
+        qs = qs.filter(행정동코드__in=_codes_for(dongs, request.GET.get("gu", "").strip() or None))
 
     agg = qs.aggregate(
         월=Sum("월요일매출합"), 화=Sum("화요일매출합"), 수=Sum("수요일매출합"),
@@ -2575,7 +2713,7 @@ def trend_open_close(request):
     qs = CommercialData.objects.filter(기준_년분기_코드=latest_q).exclude(개업_율_평균__isnull=True)
     if dongs_param:
         dongs = [normalize_dong(d) for d in dongs_param.split(",") if d.strip()]
-        qs = qs.filter(행정동명__in=dongs)
+        qs = qs.filter(행정동코드__in=_codes_for(dongs, request.GET.get("gu", "").strip() or None))
 
     rows = list(
         qs.values("통합카테고리")
@@ -2603,7 +2741,7 @@ def trend_sales_per_store(request):
     qs = CommercialData.objects.filter(기준_년분기_코드=latest_q).exclude(업종_점포당매출__isnull=True).filter(업종_점포당매출__gt=0)
     if dongs_param:
         dongs = [normalize_dong(d) for d in dongs_param.split(",") if d.strip()]
-        qs = qs.filter(행정동명__in=dongs)
+        qs = qs.filter(행정동코드__in=_codes_for(dongs, request.GET.get("gu", "").strip() or None))
 
     rows = list(
         qs.values("통합카테고리")
@@ -2708,7 +2846,9 @@ def trend_naver(request):
 
 
 def report(request):
-    dong = normalize_dong(request.GET.get("dong", ""))
+    code, dong, err = resolve_dong(request.GET.get("dong", ""), request.GET.get("gu"))
+    if err:
+        return err
     category = request.GET.get("category", "")
     data_only = request.GET.get("data_only") == "1"
 
@@ -2717,7 +2857,7 @@ def report(request):
 
     target = (
         CommercialData.objects
-        .filter(행정동명=dong)
+        .filter(행정동코드=code)
         .order_by("-기준_년분기_코드")
         .values_list("기준_년분기_코드", flat=True)
         .first()
@@ -2727,7 +2867,7 @@ def report(request):
 
     총매출 = (
         CommercialData.objects
-        .filter(행정동명=dong, 기준_년분기_코드=target)
+        .filter(행정동코드=code, 기준_년분기_코드=target)
         .values_list("행정동_전체매출", flat=True)
         .first() or 0
     )
@@ -2735,25 +2875,25 @@ def report(request):
     dong_revenues = (
         CommercialData.objects
         .filter(기준_년분기_코드=target)
-        .values("행정동명")
+        .values("행정동코드")
         .annotate(총매출=Max("행정동_전체매출"))
     )
     전체동수 = dong_revenues.count()
     순위 = dong_revenues.filter(총매출__gt=총매출).count() + 1
 
-    first_row = CommercialData.objects.filter(행정동명=dong, 기준_년분기_코드=target).first()
+    first_row = CommercialData.objects.filter(행정동코드=code, 기준_년분기_코드=target).first()
     총유동인구 = int(first_row.총유동인구) if first_row and first_row.총유동인구 else 0
     주거인구 = int(first_row.주거인구) if first_row and first_row.주거인구 else 0
     직장인구 = int(first_row.총_직장_인구_수) if first_row and first_row.총_직장_인구_수 else 0
 
     industries = list(
         CommercialData.objects
-        .filter(행정동명=dong, 기준_년분기_코드=target)
+        .filter(행정동코드=code, 기준_년분기_코드=target)
         .values("통합카테고리", "당월매출합", "점포수")
         .order_by("-당월매출합")[:5]
     )
 
-    agg = CommercialData.objects.filter(행정동명=dong, 기준_년분기_코드=target).aggregate(
+    agg = CommercialData.objects.filter(행정동코드=code, 기준_년분기_코드=target).aggregate(
         남성매출=Sum("남성매출합"),
         여성매출=Sum("여성매출합"),
         월요일=Sum("월요일매출합"),
@@ -2804,8 +2944,8 @@ def report(request):
     }
 
     if category:
-        cat_row = CommercialData.objects.filter(행정동명=dong, 기준_년분기_코드=target, 통합카테고리=category).first()
-        score_row = ScoreData.objects.filter(행정동명=dong, 기준_년분기_코드=target, 통합카테고리=category).first()
+        cat_row = CommercialData.objects.filter(행정동코드=code, 기준_년분기_코드=target, 통합카테고리=category).first()
+        score_row = ScoreData.objects.filter(행정동코드=code, 기준_년분기_코드=target, 통합카테고리=category).first()
         if cat_row:
             점포수 = cat_row.점포수 or 0
             프랜차이즈 = cat_row.프랜차이즈_점포수 or 0
@@ -2857,7 +2997,7 @@ def report(request):
             pass
         return JsonResponse({"data": data, "ai_descriptions": {}, "quarter": target, "category": category})
 
-    _rc_key = f"dong:{dong}:{category or ''}"
+    _rc_key = f"dong:{code or dong}:{category or ''}"
     ai_descriptions = _REPORT_CACHE.get(_rc_key, {})
     try:
         import urllib.request as _urllib
@@ -2962,10 +3102,11 @@ def gu_report(request):
     data_only = body.get("data_only", False)
     if not gu or not dongs:
         return JsonResponse({"error": "gu, dongs 필요"}, status=400)
+    codes = _codes_for(dongs, gu)
 
     target = (
         CommercialData.objects
-        .filter(행정동명__in=dongs)
+        .filter(행정동코드__in=codes)
         .order_by("-기준_년분기_코드")
         .values_list("기준_년분기_코드", flat=True)
         .first()
@@ -2975,7 +3116,7 @@ def gu_report(request):
 
     industries = list(
         CommercialData.objects
-        .filter(행정동명__in=dongs, 기준_년분기_코드=target)
+        .filter(행정동코드__in=codes, 기준_년분기_코드=target)
         .values("통합카테고리")
         .annotate(당월매출합=Sum("당월매출합"), 점포수=Sum("점포수"))
         .order_by("-당월매출합")
@@ -2992,7 +3133,7 @@ def gu_report(request):
     for row in gu_revenues:
         pass
 
-    agg = CommercialData.objects.filter(행정동명__in=dongs, 기준_년분기_코드=target).aggregate(
+    agg = CommercialData.objects.filter(행정동코드__in=codes, 기준_년분기_코드=target).aggregate(
         총유동인구=Sum("총유동인구"),
         주거인구=Sum("주거인구"),
         직장인구=Sum("총_직장_인구_수"),
@@ -3046,7 +3187,7 @@ def gu_report(request):
 
     if category:
         cat_agg = CommercialData.objects.filter(
-            행정동명__in=dongs, 기준_년분기_코드=target, 통합카테고리=category
+            행정동코드__in=codes, 기준_년분기_코드=target, 통합카테고리=category
         ).aggregate(
             점포수=Sum("점포수"),
             프랜차이즈=Sum("프랜차이즈_점포수"),
@@ -3077,7 +3218,7 @@ def gu_report(request):
             요일_일=Sum("일요일매출합"),
         )
         score_rows = ScoreData.objects.filter(
-            행정동명__in=dongs, 기준_년분기_코드=target, 통합카테고리=category
+            행정동코드__in=codes, 기준_년분기_코드=target, 통합카테고리=category
         )
         avg_성장확률 = score_rows.aggregate(avg=Avg("성장확률"))["avg"]
         점포수 = cat_agg["점포수"] or 0
@@ -3231,22 +3372,18 @@ def compare_region(request):
         return JsonResponse({"error": "a, b, category 파라미터가 필요합니다."}, status=400)
 
     def _get_dong_list(region_name):
+        """지역 이름 → 행정동코드 목록 (없으면 None, 이름이 겹치면 오류 응답)"""
         if region_type == "dong":
-            name = normalize_dong(region_name)
-            return [name] if CommercialData.objects.filter(행정동명=name).exists() else None
-        else:
-            gu_prefix = next((k for k, v in _GU_CODE_MAP.items() if v == region_name), None)
-            if not gu_prefix:
-                return None
-            dongs = list(
-                CommercialData.objects.filter(행정동코드__startswith=int(gu_prefix))
-                .values_list("행정동명", flat=True).distinct()
-            )
-            return dongs if dongs else None
+            code, _, err = resolve_dong(region_name)
+            if err:
+                return err
+            return [code] if code is not None else None
+        codes = _codes_in_gu(region_name)
+        return codes if codes else None
 
     def _get_metrics(dong_list, region_name):
         latest = (
-            CommercialData.objects.filter(행정동명__in=dong_list, 통합카테고리=category)
+            CommercialData.objects.filter(행정동코드__in=dong_list, 통합카테고리=category)
             .order_by("-기준_년분기_코드")
             .values_list("기준_년분기_코드", flat=True)
             .first()
@@ -3254,7 +3391,7 @@ def compare_region(request):
         if not latest:
             return None, None
         agg = CommercialData.objects.filter(
-            행정동명__in=dong_list, 통합카테고리=category, 기준_년분기_코드=latest
+            행정동코드__in=dong_list, 통합카테고리=category, 기준_년분기_코드=latest
         ).aggregate(
             점포수=Sum("점포수"),
             매출합=Sum("당월매출합"),
@@ -3265,7 +3402,7 @@ def compare_region(request):
             개업률=Avg("개업_율_평균"),
             폐업률=Avg("폐업_률_평균"),
         )
-        score_qs = ScoreData.objects.filter(행정동명__in=dong_list, 통합카테고리=category)
+        score_qs = ScoreData.objects.filter(행정동코드__in=dong_list, 통합카테고리=category)
         score_agg = score_qs.aggregate(성장확률=Avg("성장확률"))
         grades = list(score_qs.values_list("등급", flat=True))
         등급 = Counter(grades).most_common(1)[0][0] if grades else "-"
@@ -3285,13 +3422,16 @@ def compare_region(request):
 
     dong_list_a = _get_dong_list(a)
     dong_list_b = _get_dong_list(b)
+    for result in (dong_list_a, dong_list_b):
+        if isinstance(result, JsonResponse):
+            return result
     if dong_list_a is None:
         return JsonResponse({"error": f"'{a}' 지역을 찾을 수 없습니다."}, status=404)
     if dong_list_b is None:
         return JsonResponse({"error": f"'{b}' 지역을 찾을 수 없습니다."}, status=404)
 
-    name_a = normalize_dong(a) if region_type == "dong" else a
-    name_b = normalize_dong(b) if region_type == "dong" else b
+    name_a = a.strip() if region_type == "dong" else a
+    name_b = b.strip() if region_type == "dong" else b
     data_a, q_a = _get_metrics(dong_list_a, name_a)
     data_b, q_b = _get_metrics(dong_list_b, name_b)
 
@@ -3311,7 +3451,7 @@ def compare_industry(request):
       cat_a       = 업종 A
       cat_b       = 업종 B
     """
-    region = normalize_dong(request.GET.get("region", "").strip())
+    region = request.GET.get("region", "").strip()
     region_type = request.GET.get("region_type", "dong")
     cat_a = request.GET.get("cat_a", "").strip()
     cat_b = request.GET.get("cat_b", "").strip()
@@ -3320,14 +3460,14 @@ def compare_industry(request):
 
     def _get_industry_metrics(dong_list, cat, region_name):
         latest = (
-            CommercialData.objects.filter(행정동명__in=dong_list, 통합카테고리=cat)
+            CommercialData.objects.filter(행정동코드__in=dong_list, 통합카테고리=cat)
             .order_by("-기준_년분기_코드")
             .values_list("기준_년분기_코드", flat=True)
             .first()
         )
         if not latest:
             return None
-        agg = CommercialData.objects.filter(행정동명__in=dong_list, 통합카테고리=cat, 기준_년분기_코드=latest).aggregate(
+        agg = CommercialData.objects.filter(행정동코드__in=dong_list, 통합카테고리=cat, 기준_년분기_코드=latest).aggregate(
             점포수=Sum("점포수"),
             매출합=Sum("당월매출합"),
             경쟁강도=Avg("경쟁강도"),
@@ -3338,7 +3478,7 @@ def compare_industry(request):
             폐업률=Avg("폐업_률_평균"),
         )
         # ScoreData (행정동 모드에서는 정확한 행정동, 구 모드에서는 평균)
-        score_qs = ScoreData.objects.filter(행정동명__in=dong_list, 통합카테고리=cat)
+        score_qs = ScoreData.objects.filter(행정동코드__in=dong_list, 통합카테고리=cat)
         score_agg = score_qs.aggregate(성장확률=Avg("성장확률"))
         # 등급은 가장 많은 등급으로
         from collections import Counter
@@ -3360,15 +3500,14 @@ def compare_industry(request):
         }
 
     if region_type == "dong":
-        dong_list = [region]
+        code, _, err = resolve_dong(region)
+        if err:
+            return err
+        dong_list = [code] if code is not None else []
     else:
-        gu_prefix = next((k for k, v in _GU_CODE_MAP.items() if v == region), None)
-        if not gu_prefix:
+        dong_list = _codes_in_gu(region)
+        if not dong_list:
             return JsonResponse({"error": f"'{region}' 구를 찾을 수 없습니다."}, status=404)
-        dong_list = list(
-            CommercialData.objects.filter(행정동코드__startswith=int(gu_prefix))
-            .values_list("행정동명", flat=True).distinct()
-        )
 
     metrics_a = _get_industry_metrics(dong_list, cat_a, region)
     metrics_b = _get_industry_metrics(dong_list, cat_b, region)
@@ -3430,9 +3569,9 @@ def search_regions(request):
         seen = set()
         for row in dongs:
             name = row["행정동명"]
-            if name in seen:
+            if row["행정동코드"] in seen:
                 continue
-            seen.add(name)
+            seen.add(row["행정동코드"])
             code_str = str(row["행정동코드"])[:5]
             gu = _GU_CODE_MAP.get(code_str, "")
             out.append({"dong": name, "gu": gu, "type": "dong"})
@@ -3449,9 +3588,9 @@ def search_regions(request):
     seen = set()
     for row in dongs:
         name = row["행정동명"]
-        if name in seen:
+        if row["행정동코드"] in seen:
             continue
-        seen.add(name)
+        seen.add(row["행정동코드"])
         code_str = str(row["행정동코드"])[:5]
         gu = _GU_CODE_MAP.get(code_str, "")
         out.append({"dong": name, "gu": gu, "type": "dong"})
@@ -3564,18 +3703,19 @@ def recommend_similar(request):
     """현재 행정동보다 AI 점수가 높은 반경 3km 이내 행정동 Top 3 반환
     GET /api/recommend/similar/?dong=강남1동&category=카페
     """
-    dong = normalize_dong(request.GET.get("dong", ""))
+    code, dong, err = resolve_dong(request.GET.get("dong", ""), request.GET.get("gu"))
+    if err:
+        return err
     category = request.GET.get("category", "").strip()
     if not dong or not category:
         return JsonResponse({"error": "dong, category 파라미터가 필요합니다."}, status=400)
 
-    base = ScoreData.objects.filter(행정동명=dong, 통합카테고리=category).first()
+    base = ScoreData.objects.filter(행정동코드=code, 통합카테고리=category).first()
     if not base:
         return JsonResponse({"results": []})
 
     base_score = base.성장확률
-    centroids = _get_dong_centroids()
-    base_centroid = centroids.get(dong)
+    base_centroid = _dong_centroid(dong, _gu_of_code(code) or None)
     if not base_centroid:
         return JsonResponse({"results": []})
 
@@ -3584,19 +3724,20 @@ def recommend_similar(request):
     candidates = (
         ScoreData.objects
         .filter(통합카테고리=category, 성장확률__gt=base_score)
-        .exclude(행정동명=dong)
-        .values("행정동명", "성장확률", "등급")
+        .exclude(행정동코드=code)
+        .values("행정동코드", "행정동명", "성장확률", "등급")
     )
 
     results = []
     for row in candidates:
-        c = centroids.get(row["행정동명"])
+        c = _dong_centroid(row["행정동명"], _gu_of_code(row["행정동코드"]) or None)
         if not c:
             continue
         dist = _haversine_km(base_lat, base_lng, c["lat"], c["lng"])
         if dist <= 3.0:
             results.append({
                 "dong": row["행정동명"],
+                "gu": _gu_of_code(row["행정동코드"]),
                 "grade": row["등급"],
                 "score": round(row["성장확률"], 1),
                 "distance_km": round(dist, 1),

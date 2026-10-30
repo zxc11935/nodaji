@@ -120,6 +120,7 @@ class CommercialData(models.Model):
 
 class ScoreData(models.Model):
     """AI 창업 적합도 점수 (업종×행정동, 최신 분기)"""
+    행정동코드      = models.BigIntegerField(null=True)
     행정동명        = models.CharField(max_length=50)
     통합카테고리    = models.CharField(max_length=50)
     기준_년분기_코드 = models.IntegerField()
@@ -133,6 +134,7 @@ class ScoreData(models.Model):
         indexes = [
             models.Index(fields=["행정동명"]),
             models.Index(fields=["행정동명", "통합카테고리"]),
+            models.Index(fields=["행정동코드", "통합카테고리"]),
         ]
 
 
@@ -207,4 +209,4 @@ class StoreInfo(models.Model):
             models.Index(fields=["행정동명", "기준_년분기_코드"]),
             models.Index(fields=["상권업종소분류명"]),
             models.Index(fields=["행정동명", "상권업종소분류명"]),
-        ]
+        ]

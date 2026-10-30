@@ -175,7 +175,7 @@ all_latest["등급"] = all_latest["상위_퍼센트"].apply(to_grade)
 all_latest["성장확률_pct"] = (all_latest["성장확률"] * 100).round(1)
 
 scores_df = all_latest[[
-    "행정동명", "통합카테고리", "기준_년분기_코드",
+    "행정동코드", "행정동명", "통합카테고리", "기준_년분기_코드",
     "성장확률_pct", "업종내_순위", "업종내_전체동수", "상위_퍼센트", "등급"
 ]].copy()
 
@@ -184,6 +184,7 @@ scores_df.to_csv(SCORES_PATH, index=False, encoding="utf-8-sig")
 print(f"저장 완료: {SCORES_PATH}")
 print(f"총 {len(scores_df):,}개 (행정동×업종)")
 print(f"포함된 행정동 수: {scores_df['행정동명'].nunique()}")
+print(f"포함된 행정동코드 수: {scores_df['행정동코드'].nunique()}")
 
 missing = ['가양2동', '구로1동', '둔촌1동', '신정6동', '암사3동', '위례동', '일원본동', '잠실7동', '하계2동', '항동']
 found = [d for d in missing if d in scores_df['행정동명'].values]
