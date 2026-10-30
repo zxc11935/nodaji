@@ -209,4 +209,4 @@ class StoreInfo(models.Model):
             models.Index(fields=["행정동명", "기준_년분기_코드"]),
             models.Index(fields=["상권업종소분류명"]),
             models.Index(fields=["행정동명", "상권업종소분류명"]),
-        ]
+        ]

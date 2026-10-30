@@ -47,4 +47,4 @@ class Command(BaseCommand):
                 ScoreData.objects.bulk_create(objs)
                 total += len(objs)
 
-        self.stdout.write(self.style.SUCCESS(f"완료! {total}개 임포트됨."))
+        self.stdout.write(self.style.SUCCESS(f"완료! {total}개 임포트됨."))
